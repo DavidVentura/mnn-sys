@@ -2,7 +2,7 @@
 name = "mnn-sys"
 version = "0.1.0"
 edition = "2021"
-description = "Safe Rust bindings to a thin C wrapper around Alibaba MNN. Forked from rust-paddle-ocr's mnn module."
+description = "Safe Rust bindings to a thin C wrapper around Alibaba MNN. Builds MNN from the vendored submodule at 3rd_party/MNN."
 license = "Apache-2.0"
 
 [features]
@@ -15,11 +15,6 @@ opengl = []
 vulkan = []
 cuda = []
 coreml = []
-
-# MNN linking modes
-build-mnn-from-source = []
-mnn-dynamic = []
-mnn-static = []
 
 [dependencies]
 ndarray = "0.16"

@@ -1,0 +1,4 @@
+[submodule "3rd_party/MNN"]
+	path = 3rd_party/MNN
+	url = https://github.com/alibaba/MNN.git
+	shallow = true
