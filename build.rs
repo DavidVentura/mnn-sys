@@ -128,6 +128,10 @@ fn build_mnn_with_cmake(
             .define("ANDROID_NATIVE_API_LEVEL", "android-21")
             .define("ANDROID_TOOLCHAIN", "clang")
             .define("MNN_BUILD_FOR_ANDROID_COMMAND", "ON")
+            // Required for fast weight-quantized Kokoro convs on Android:
+            // runtime `memory=low` then uses the dynamic int8/dequant GEMM path.
+            .define("MNN_LOW_MEMORY", "ON")
+            .define("MNN_CPU_WEIGHT_DEQUANT_GEMM", "ON")
             .define("MNN_USE_SSE", "OFF");
 
         match arch {
