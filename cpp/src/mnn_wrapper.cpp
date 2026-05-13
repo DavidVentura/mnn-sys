@@ -2,6 +2,11 @@
 #include <MNN/Interpreter.hpp>
 #include <MNN/Tensor.hpp>
 #include <MNN/MNNDefine.h>
+#include <MNN/expr/Expr.hpp>
+#include <MNN/expr/ExprCreator.hpp>
+#include <MNN/expr/MathOp.hpp>
+#include <MNN/expr/Module.hpp>
+#include <MNN/expr/NeuralNetWorkOp.hpp>
 
 #include <cstring>
 #include <vector>
@@ -10,6 +15,7 @@
 #include <queue>
 #include <string>
 #include <memory>
+#include <map>
 
 #if OCR_RS_FORCE_VULKAN_LINK
 #include "VulkanRuntime.hpp"
@@ -86,6 +92,19 @@ struct MNN_SessionPool
     std::string last_error;
 };
 
+struct MNN_ModuleEngine
+{
+    std::shared_ptr<MNN::Express::Executor::RuntimeManager> runtime_manager;
+    std::shared_ptr<MNN::Express::Module> module;
+    std::vector<std::string> input_names;
+    std::vector<std::string> output_names;
+    MNN::Express::Dimensionformat input_format;
+    std::mutex mutex;
+    std::string last_error;
+
+    MNN_ModuleEngine() : input_format(MNN::Express::NCHW) {}
+};
+
 // ============== Helper Functions ==============
 
 struct MNN_ScheduleBundle
@@ -128,9 +147,64 @@ static MNN_ScheduleBundle create_schedule_config(const MNNR_Config *config)
         bundle.backend_config.precision = MNN::BackendConfig::Precision_Normal;
         break;
     }
+
+    switch (config ? config->memory_mode : 0)
+    {
+    case 1:
+        bundle.backend_config.memory = MNN::BackendConfig::Memory_Low;
+        break;
+    case 2:
+        bundle.backend_config.memory = MNN::BackendConfig::Memory_High;
+        break;
+    default:
+        bundle.backend_config.memory = MNN::BackendConfig::Memory_Normal;
+        break;
+    }
     bundle.schedule_config.backendConfig = &bundle.backend_config;
 
     return bundle;
+}
+
+static MNN::Express::Dimensionformat data_format_to_dimension_format(const MNNR_Config *config)
+{
+    switch (config ? config->data_format : MNNR_DATA_FORMAT_NCHW)
+    {
+    case MNNR_DATA_FORMAT_NHWC:
+        return MNN::Express::NHWC;
+    case MNNR_DATA_FORMAT_NCHW:
+    case MNNR_DATA_FORMAT_AUTO:
+    default:
+        return MNN::Express::NCHW;
+    }
+}
+
+static std::vector<std::string> copy_names(const char *const *names, size_t count)
+{
+    std::vector<std::string> out;
+    out.reserve(count);
+    for (size_t i = 0; i < count; i++)
+    {
+        if (names && names[i])
+        {
+            out.emplace_back(names[i]);
+        }
+    }
+    return out;
+}
+
+static std::string parent_path(const char *path)
+{
+    if (!path)
+    {
+        return ".";
+    }
+    std::string s(path);
+    auto pos = s.find_last_of("/\\");
+    if (pos == std::string::npos)
+    {
+        return ".";
+    }
+    return s.substr(0, pos);
 }
 
 static bool init_engine_tensors(MNN_InferenceEngine *engine)
@@ -203,6 +277,19 @@ MNN_SharedRuntime *mnnr_create_runtime(const MNNR_Config *config)
         runtime->backend_config.precision = MNN::BackendConfig::Precision_Normal;
         break;
     }
+
+    switch (config ? config->memory_mode : 0)
+    {
+    case 1:
+        runtime->backend_config.memory = MNN::BackendConfig::Memory_Low;
+        break;
+    case 2:
+        runtime->backend_config.memory = MNN::BackendConfig::Memory_High;
+        break;
+    default:
+        runtime->backend_config.memory = MNN::BackendConfig::Memory_Normal;
+        break;
+    }
     runtime->schedule_config.backendConfig = &runtime->backend_config;
 
     return runtime;
@@ -247,6 +334,43 @@ MNN_InferenceEngine *mnnr_create_engine(
     }
 
     // Initialize tensors
+    if (!init_engine_tensors(engine))
+    {
+        delete engine;
+        return nullptr;
+    }
+
+    return engine;
+}
+
+MNN_InferenceEngine *mnnr_create_engine_from_file(
+    const char *model_path,
+    const MNNR_Config *config)
+{
+    if (!model_path)
+    {
+        return nullptr;
+    }
+
+    auto engine = new MNN_InferenceEngine();
+
+    engine->interpreter.reset(MNN::Interpreter::createFromFile(model_path));
+    if (!engine->interpreter)
+    {
+        engine->last_error = "Failed to create interpreter from file";
+        delete engine;
+        return nullptr;
+    }
+
+    auto schedule = create_schedule_config(config);
+    engine->default_session = engine->interpreter->createSession(schedule.schedule_config);
+    if (!engine->default_session)
+    {
+        engine->last_error = "Failed to create default session";
+        delete engine;
+        return nullptr;
+    }
+
     if (!init_engine_tensors(engine))
     {
         delete engine;
@@ -746,4 +870,268 @@ MNNR_ErrorCode mnnr_run_inference_dynamic(
 void mnnr_free_output(float *output_data)
 {
     delete[] output_data;
+}
+
+// ============== Express Module API ==============
+
+MNN_ModuleEngine *mnnr_create_module_from_file(
+    const char *model_path,
+    const char *const *input_names,
+    size_t input_count,
+    const char *const *output_names,
+    size_t output_count,
+    const MNNR_Config *config)
+{
+    if (!model_path || input_count == 0 || output_count == 0)
+    {
+        return nullptr;
+    }
+
+    auto engine = new MNN_ModuleEngine();
+    engine->input_names = copy_names(input_names, input_count);
+    engine->output_names = copy_names(output_names, output_count);
+    engine->input_format = data_format_to_dimension_format(config);
+    if (engine->input_names.size() != input_count || engine->output_names.size() != output_count)
+    {
+        delete engine;
+        return nullptr;
+    }
+
+    auto schedule = create_schedule_config(config);
+    engine->runtime_manager.reset(
+        MNN::Express::Executor::RuntimeManager::createRuntimeManager(schedule.schedule_config));
+    if (!engine->runtime_manager)
+    {
+        delete engine;
+        return nullptr;
+    }
+    engine->runtime_manager->setHint(MNN::Interpreter::INIT_THREAD_NUMBER, 4);
+    auto model_dir = parent_path(model_path);
+    engine->runtime_manager->setExternalPath(model_dir, 3);
+
+    MNN::Express::Module::Config module_config;
+    module_config.shapeMutable = true;
+    engine->module.reset(
+        MNN::Express::Module::load(
+            engine->input_names,
+            engine->output_names,
+            model_path,
+            engine->runtime_manager,
+            &module_config),
+        MNN::Express::Module::destroy);
+    if (!engine->module)
+    {
+        engine->last_error = "Failed to create Express module from file";
+        delete engine;
+        return nullptr;
+    }
+
+    return engine;
+}
+
+void mnnr_destroy_module(MNN_ModuleEngine *module)
+{
+    delete module;
+}
+
+static MNN::Express::VARP create_module_input(
+    const MNNR_NamedInput &input,
+    const MNN::Express::Variable::Info &model_info,
+    std::string &error)
+{
+    if (!input.name || !input.data || !input.dims || input.ndims == 0 || input.ndims > MNNR_MAX_DIMS)
+    {
+        error = "Invalid module input";
+        return nullptr;
+    }
+
+    size_t expected_elements = 1;
+    std::vector<int> shape(input.ndims);
+    for (size_t d = 0; d < input.ndims; d++)
+    {
+        if (input.dims[d] == 0)
+        {
+            error = "Module input dimensions must be non-zero";
+            return nullptr;
+        }
+        shape[d] = static_cast<int>(input.dims[d]);
+        expected_elements *= input.dims[d];
+    }
+    if (expected_elements != input.element_count)
+    {
+        error = "Module input shape/data size mismatch";
+        return nullptr;
+    }
+
+    using namespace MNN::Express;
+    auto format = model_info.order;
+    if (format == NC4HW4)
+    {
+        format = NCHW;
+    }
+
+    VARP var;
+    switch (input.data_type)
+    {
+    case MNNR_TENSOR_FLOAT32:
+    {
+        var = _Input(shape, format, halide_type_of<float>());
+        std::memcpy(var->writeMap<float>(), input.data, input.element_count * sizeof(float));
+        break;
+    }
+    case MNNR_TENSOR_INT32:
+    {
+        var = _Input(shape, format, halide_type_of<int32_t>());
+        std::memcpy(var->writeMap<int32_t>(), input.data, input.element_count * sizeof(int32_t));
+        break;
+    }
+    case MNNR_TENSOR_INT64:
+    {
+        var = _Input(shape, format, halide_type_of<int64_t>());
+        std::memcpy(var->writeMap<int64_t>(), input.data, input.element_count * sizeof(int64_t));
+        break;
+    }
+    default:
+        error = "Unsupported module input tensor type";
+        return nullptr;
+    }
+
+    if (var->getInfo()->type != model_info.type)
+    {
+        var = _Cast(var, model_info.type);
+    }
+    if (model_info.order == NC4HW4)
+    {
+        var = _Convert(var, NC4HW4);
+    }
+    return var;
+}
+
+MNNR_ErrorCode mnnr_run_module_named_dynamic(
+    MNN_ModuleEngine *module,
+    const MNNR_NamedInput *inputs,
+    size_t input_count,
+    MNNR_NamedOutput *outputs,
+    size_t output_count)
+{
+    if (!module || !module->module || !inputs || !outputs ||
+        input_count != module->input_names.size() ||
+        output_count != module->output_names.size())
+    {
+        return MNNR_ERROR_INVALID_PARAMETER;
+    }
+
+    std::lock_guard<std::mutex> lock(module->mutex);
+
+    std::map<std::string, const MNNR_NamedInput *> input_map;
+    for (size_t i = 0; i < input_count; i++)
+    {
+        if (!inputs[i].name)
+        {
+            module->last_error = "Module input name is null";
+            return MNNR_ERROR_INVALID_PARAMETER;
+        }
+        input_map[inputs[i].name] = &inputs[i];
+    }
+
+    std::vector<MNN::Express::VARP> vars;
+    vars.reserve(module->input_names.size());
+    auto module_info = module->module->getInfo();
+    if (!module_info || module_info->inputs.size() != module->input_names.size())
+    {
+        module->last_error = "Module input metadata is unavailable";
+        return MNNR_ERROR_RUNTIME_ERROR;
+    }
+    for (const auto &name : module->input_names)
+    {
+        size_t input_index = vars.size();
+        auto iter = input_map.find(name);
+        if (iter == input_map.end())
+        {
+            module->last_error = "Missing module input: " + name;
+            return MNNR_ERROR_INVALID_PARAMETER;
+        }
+        auto var = create_module_input(*iter->second, module_info->inputs[input_index], module->last_error);
+        if (var.get() == nullptr)
+        {
+            return MNNR_ERROR_INVALID_PARAMETER;
+        }
+        vars.emplace_back(var);
+    }
+
+    auto result_vars = module->module->onForward(vars);
+    if (result_vars.size() < output_count)
+    {
+        module->last_error = "Module returned fewer outputs than requested";
+        return MNNR_ERROR_RUNTIME_ERROR;
+    }
+
+    using namespace MNN::Express;
+    for (size_t i = 0; i < output_count; i++)
+    {
+        auto &output = outputs[i];
+        if (!output.name)
+        {
+            module->last_error = "Invalid module output";
+            return MNNR_ERROR_INVALID_PARAMETER;
+        }
+
+        auto var = result_vars[i];
+        auto info = var->getInfo();
+        if (!info)
+        {
+            module->last_error = std::string("Module output has no info: ") + output.name;
+            return MNNR_ERROR_RUNTIME_ERROR;
+        }
+        if (info->order == NC4HW4 && info->dim.size() > 1)
+        {
+            var = _Convert(var, module_info->defaultFormat);
+            info = var->getInfo();
+        }
+        if (info->type.code != halide_type_float)
+        {
+            var = _Cast<float>(var);
+            info = var->getInfo();
+        }
+        var.fix(VARP::CONSTANT);
+        info = var->getInfo();
+        if (!info || info->dim.size() > MNNR_MAX_DIMS)
+        {
+            module->last_error = std::string("Invalid module output shape: ") + output.name;
+            return MNNR_ERROR_RUNTIME_ERROR;
+        }
+        auto ptr = var->readMap<float>();
+        if (!ptr && info->size > 0)
+        {
+            module->last_error = std::string("Failed to read module output: ") + output.name;
+            return MNNR_ERROR_RUNTIME_ERROR;
+        }
+
+        output.ndims = info->dim.size();
+        for (size_t d = 0; d < info->dim.size(); d++)
+        {
+            output.dims[d] = static_cast<size_t>(info->dim[d]);
+        }
+        for (size_t d = info->dim.size(); d < MNNR_MAX_DIMS; d++)
+        {
+            output.dims[d] = 0;
+        }
+        output.element_count = static_cast<size_t>(info->size);
+        output.data = new float[output.element_count];
+        if (output.element_count > 0)
+        {
+            std::memcpy(output.data, ptr, output.element_count * sizeof(float));
+        }
+    }
+
+    return MNNR_SUCCESS;
+}
+
+const char *mnnr_module_get_last_error(const MNN_ModuleEngine *module)
+{
+    if (!module)
+    {
+        return "Module is null";
+    }
+    return module->last_error.c_str();
 }

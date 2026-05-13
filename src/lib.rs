@@ -5,7 +5,7 @@
 //! preserved; OCR-specific layers are not part of this crate.
 
 use ndarray::{ArrayD, ArrayViewD, IxDyn};
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::ptr::NonNull;
 
 #[allow(non_camel_case_types)]
@@ -15,6 +15,8 @@ use std::ptr::NonNull;
 mod ffi {
     include!(concat!(env!("OUT_DIR"), "/mnn_bindings.rs"));
 }
+
+const MNNR_MAX_DIMS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MnnError {
@@ -69,6 +71,15 @@ pub enum DataFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(i32)]
+pub enum MemoryMode {
+    #[default]
+    Normal = 0,
+    Low = 1,
+    High = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Backend {
     #[default]
     CPU,
@@ -87,6 +98,7 @@ pub struct InferenceConfig {
     pub use_cache: bool,
     pub data_format: DataFormat,
     pub backend: Backend,
+    pub memory_mode: MemoryMode,
 }
 
 impl Default for InferenceConfig {
@@ -97,6 +109,7 @@ impl Default for InferenceConfig {
             use_cache: false,
             data_format: DataFormat::NCHW,
             backend: Backend::CPU,
+            memory_mode: MemoryMode::Normal,
         }
     }
 }
@@ -126,6 +139,11 @@ impl InferenceConfig {
         self
     }
 
+    pub fn with_memory(mut self, memory: MemoryMode) -> Self {
+        self.memory_mode = memory;
+        self
+    }
+
     fn to_ffi(&self) -> ffi::MNNR_Config {
         ffi::MNNR_Config {
             thread_count: self.thread_count,
@@ -141,8 +159,64 @@ impl InferenceConfig {
             },
             use_cache: self.use_cache,
             data_format: self.data_format as i32,
+            memory_mode: self.memory_mode as i32,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum TensorType {
+    F32 = 0,
+    I32 = 1,
+    I64 = 2,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TensorData<'a> {
+    F32(&'a [f32]),
+    I32(&'a [i32]),
+    I64(&'a [i64]),
+}
+
+impl TensorData<'_> {
+    fn data_type(self) -> TensorType {
+        match self {
+            TensorData::F32(_) => TensorType::F32,
+            TensorData::I32(_) => TensorType::I32,
+            TensorData::I64(_) => TensorType::I64,
+        }
+    }
+
+    fn len(self) -> usize {
+        match self {
+            TensorData::F32(data) => data.len(),
+            TensorData::I32(data) => data.len(),
+            TensorData::I64(data) => data.len(),
+        }
+    }
+
+    fn as_ptr(self) -> *const std::ffi::c_void {
+        match self {
+            TensorData::F32(data) => data.as_ptr() as *const std::ffi::c_void,
+            TensorData::I32(data) => data.as_ptr() as *const std::ffi::c_void,
+            TensorData::I64(data) => data.as_ptr() as *const std::ffi::c_void,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NamedInput<'a> {
+    pub name: &'a str,
+    pub data: TensorData<'a>,
+    pub shape: &'a [usize],
+}
+
+#[derive(Debug, Clone)]
+pub struct NamedOutput {
+    pub name: String,
+    pub data: Vec<f32>,
+    pub shape: Vec<usize>,
 }
 
 pub struct SharedRuntime {
@@ -188,6 +262,250 @@ fn get_last_error_message(engine: Option<*const ffi::MNN_InferenceEngine>) -> St
     }
 }
 
+fn get_last_module_error_message(module: Option<*const ffi::MNN_ModuleEngine>) -> String {
+    match module {
+        Some(ptr) => unsafe {
+            let c_str = ffi::mnnr_module_get_last_error(ptr);
+            if c_str.is_null() {
+                "Unknown module error".to_string()
+            } else {
+                CStr::from_ptr(c_str).to_string_lossy().into_owned()
+            }
+        },
+        None => "Module creation failed".to_string(),
+    }
+}
+
+pub struct ModuleEngine {
+    ptr: NonNull<ffi::MNN_ModuleEngine>,
+}
+
+impl ModuleEngine {
+    pub fn from_file(
+        model_path: impl AsRef<std::path::Path>,
+        input_names: &[&str],
+        output_names: &[&str],
+        config: Option<InferenceConfig>,
+    ) -> Result<Self> {
+        if input_names.is_empty() || output_names.is_empty() {
+            return Err(MnnError::InvalidParameter(
+                "At least one input and output name is required".to_string(),
+            ));
+        }
+
+        let path = model_path.as_ref();
+        let path = path.to_str().ok_or_else(|| {
+            MnnError::ModelLoadFailed("Model path is not valid UTF-8".to_string())
+        })?;
+        let path = CString::new(path).map_err(|_| {
+            MnnError::ModelLoadFailed("Model path contains an interior NUL byte".to_string())
+        })?;
+
+        let input_storage: Vec<CString> = input_names
+            .iter()
+            .map(|name| {
+                CString::new(*name).map_err(|_| {
+                    MnnError::InvalidParameter(format!(
+                        "Input name contains an interior NUL byte: {}",
+                        name
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?;
+        let output_storage: Vec<CString> = output_names
+            .iter()
+            .map(|name| {
+                CString::new(*name).map_err(|_| {
+                    MnnError::InvalidParameter(format!(
+                        "Output name contains an interior NUL byte: {}",
+                        name
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?;
+        let input_ptrs: Vec<*const std::ffi::c_char> =
+            input_storage.iter().map(|s| s.as_ptr()).collect();
+        let output_ptrs: Vec<*const std::ffi::c_char> =
+            output_storage.iter().map(|s| s.as_ptr()).collect();
+
+        let cfg = config.unwrap_or_default();
+        let c_config = cfg.to_ffi();
+        let module_ptr = unsafe {
+            ffi::mnnr_create_module_from_file(
+                path.as_ptr(),
+                input_ptrs.as_ptr(),
+                input_ptrs.len(),
+                output_ptrs.as_ptr(),
+                output_ptrs.len(),
+                &c_config,
+            )
+        };
+
+        let ptr = NonNull::new(module_ptr)
+            .ok_or_else(|| MnnError::ModelLoadFailed(get_last_module_error_message(None)))?;
+        Ok(Self { ptr })
+    }
+
+    pub fn run_named_dynamic(
+        &self,
+        inputs: &[NamedInput<'_>],
+        output_names: &[&str],
+    ) -> Result<Vec<NamedOutput>> {
+        if inputs.is_empty() {
+            return Err(MnnError::InvalidParameter(
+                "At least one named input is required".to_string(),
+            ));
+        }
+        if output_names.is_empty() {
+            return Err(MnnError::InvalidParameter(
+                "At least one named output is required".to_string(),
+            ));
+        }
+
+        for input in inputs {
+            if input.shape.is_empty() || input.shape.len() > MNNR_MAX_DIMS {
+                return Err(MnnError::InvalidParameter(format!(
+                    "Invalid shape for input {}",
+                    input.name
+                )));
+            }
+            let expected: usize = input.shape.iter().product();
+            if expected != input.data.len() {
+                return Err(MnnError::ShapeMismatch {
+                    expected: vec![expected],
+                    got: vec![input.data.len()],
+                });
+            }
+        }
+
+        let input_names: Vec<CString> = inputs
+            .iter()
+            .map(|input| {
+                CString::new(input.name).map_err(|_| {
+                    MnnError::InvalidParameter(format!(
+                        "Input name contains an interior NUL byte: {}",
+                        input.name
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?;
+
+        let output_name_storage: Vec<CString> = output_names
+            .iter()
+            .map(|name| {
+                CString::new(*name).map_err(|_| {
+                    MnnError::InvalidParameter(format!(
+                        "Output name contains an interior NUL byte: {}",
+                        name
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?;
+
+        let c_inputs: Vec<ffi::MNNR_NamedInput> = inputs
+            .iter()
+            .zip(input_names.iter())
+            .map(|(input, name)| ffi::MNNR_NamedInput {
+                name: name.as_ptr(),
+                data: input.data.as_ptr(),
+                element_count: input.data.len(),
+                dims: input.shape.as_ptr(),
+                ndims: input.shape.len(),
+                data_type: input.data.data_type() as i32,
+            })
+            .collect();
+
+        let mut c_outputs: Vec<ffi::MNNR_NamedOutput> = output_name_storage
+            .iter()
+            .map(|name| ffi::MNNR_NamedOutput {
+                name: name.as_ptr(),
+                data: std::ptr::null_mut(),
+                element_count: 0,
+                dims: [0; MNNR_MAX_DIMS],
+                ndims: 0,
+            })
+            .collect();
+
+        let error_code = unsafe {
+            ffi::mnnr_run_module_named_dynamic(
+                self.ptr.as_ptr(),
+                c_inputs.as_ptr(),
+                c_inputs.len(),
+                c_outputs.as_mut_ptr(),
+                c_outputs.len(),
+            )
+        };
+
+        if error_code != ffi::MNNR_ErrorCode_MNNR_SUCCESS {
+            for output in &mut c_outputs {
+                if !output.data.is_null() {
+                    unsafe {
+                        ffi::mnnr_free_output(output.data);
+                    }
+                    output.data = std::ptr::null_mut();
+                }
+            }
+            return match error_code {
+                ffi::MNNR_ErrorCode_MNNR_ERROR_INVALID_PARAMETER => {
+                    Err(MnnError::InvalidParameter(get_last_module_error_message(
+                        Some(self.ptr.as_ptr()),
+                    )))
+                }
+                ffi::MNNR_ErrorCode_MNNR_ERROR_OUT_OF_MEMORY => Err(MnnError::OutOfMemory),
+                ffi::MNNR_ErrorCode_MNNR_ERROR_UNSUPPORTED => Err(MnnError::Unsupported),
+                _ => Err(MnnError::RuntimeError(get_last_module_error_message(Some(
+                    self.ptr.as_ptr(),
+                )))),
+            };
+        }
+
+        let mut outputs = Vec::with_capacity(c_outputs.len());
+        for (output_name, c_output) in output_names.iter().zip(c_outputs.into_iter()) {
+            if c_output.data.is_null() && c_output.element_count > 0 {
+                return Err(MnnError::RuntimeError(format!(
+                    "Named output {} returned a null buffer",
+                    output_name
+                )));
+            }
+
+            let data = if c_output.element_count == 0 {
+                if !c_output.data.is_null() {
+                    unsafe {
+                        ffi::mnnr_free_output(c_output.data);
+                    }
+                }
+                Vec::new()
+            } else {
+                unsafe {
+                    let slice = std::slice::from_raw_parts(c_output.data, c_output.element_count);
+                    let data = slice.to_vec();
+                    ffi::mnnr_free_output(c_output.data);
+                    data
+                }
+            };
+
+            outputs.push(NamedOutput {
+                name: (*output_name).to_string(),
+                data,
+                shape: c_output.dims[..c_output.ndims].to_vec(),
+            });
+        }
+
+        Ok(outputs)
+    }
+}
+
+impl Drop for ModuleEngine {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::mnnr_destroy_module(self.ptr.as_ptr());
+        }
+    }
+}
+
+unsafe impl Send for ModuleEngine {}
+unsafe impl Sync for ModuleEngine {}
+
 pub struct InferenceEngine {
     ptr: NonNull<ffi::MNN_InferenceEngine>,
     input_shape: Vec<usize>,
@@ -229,9 +547,29 @@ impl InferenceEngine {
         model_path: impl AsRef<std::path::Path>,
         config: Option<InferenceConfig>,
     ) -> Result<Self> {
-        let model_buffer = std::fs::read(model_path.as_ref())
-            .map_err(|e| MnnError::ModelLoadFailed(format!("Failed to read model file: {}", e)))?;
-        Self::from_buffer(&model_buffer, config)
+        let path = model_path.as_ref();
+        let path = path.to_str().ok_or_else(|| {
+            MnnError::ModelLoadFailed("Model path is not valid UTF-8".to_string())
+        })?;
+        let path = CString::new(path).map_err(|_| {
+            MnnError::ModelLoadFailed("Model path contains an interior NUL byte".to_string())
+        })?;
+
+        let cfg = config.unwrap_or_default();
+        let c_config = cfg.to_ffi();
+
+        let engine_ptr = unsafe { ffi::mnnr_create_engine_from_file(path.as_ptr(), &c_config) };
+
+        let ptr = NonNull::new(engine_ptr)
+            .ok_or_else(|| MnnError::ModelLoadFailed(get_last_error_message(None)))?;
+
+        let (input_shape, output_shape) = unsafe { Self::get_shapes(ptr.as_ptr())? };
+
+        Ok(InferenceEngine {
+            ptr,
+            input_shape,
+            output_shape,
+        })
     }
 
     pub fn from_buffer_with_runtime(model_buffer: &[u8], runtime: &SharedRuntime) -> Result<Self> {

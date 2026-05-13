@@ -12,6 +12,7 @@ extern "C"
 
     // Opaque handles
     typedef struct MNN_InferenceEngine MNN_InferenceEngine;
+    typedef struct MNN_ModuleEngine MNN_ModuleEngine;
     typedef struct MNN_SessionPool MNN_SessionPool;
     typedef struct MNN_SharedRuntime MNN_SharedRuntime;
 
@@ -34,6 +35,44 @@ extern "C"
         MNNR_DATA_FORMAT_AUTO = 2  // Auto-detect from model
     } MNNR_DataFormat;
 
+    typedef enum
+    {
+        MNNR_MEMORY_NORMAL = 0,
+        MNNR_MEMORY_LOW = 1,
+        MNNR_MEMORY_HIGH = 2
+    } MNNR_MemoryMode;
+
+    typedef enum
+    {
+        MNNR_TENSOR_FLOAT32 = 0,
+        MNNR_TENSOR_INT32 = 1,
+        MNNR_TENSOR_INT64 = 2
+    } MNNR_TensorType;
+
+    enum
+    {
+        MNNR_MAX_DIMS = 8
+    };
+
+    typedef struct
+    {
+        const char *name;
+        const void *data;
+        size_t element_count;
+        const size_t *dims;
+        size_t ndims;
+        int32_t data_type;
+    } MNNR_NamedInput;
+
+    typedef struct
+    {
+        const char *name;
+        float *data;
+        size_t element_count;
+        size_t dims[MNNR_MAX_DIMS];
+        size_t ndims;
+    } MNNR_NamedOutput;
+
     // Configuration for inference engine
     typedef struct
     {
@@ -42,6 +81,7 @@ extern "C"
         int32_t backend;        // 0=CPU, 4=Vulkan
         bool use_cache;         // Whether to use cache file
         int32_t data_format;    // Input/Output data format
+        int32_t memory_mode;    // 0=Normal, 1=Low, 2=High
     } MNNR_Config;
 
     // ============== Version & Info ==============
@@ -66,6 +106,12 @@ extern "C"
     MNN_InferenceEngine *mnnr_create_engine(
         const void *buffer,
         size_t size,
+        const MNNR_Config *config);
+
+    // Create an inference engine from a model path.
+    // This lets MNN resolve external weight sidecars such as "<model>.weight".
+    MNN_InferenceEngine *mnnr_create_engine_from_file(
+        const char *model_path,
         const MNNR_Config *config);
 
     // Create an inference engine using a shared runtime
@@ -174,6 +220,29 @@ extern "C"
 
     // Free output buffer allocated by mnnr_run_inference_dynamic
     void mnnr_free_output(float *output_data);
+
+    // ============== Express Module API ==============
+
+    // Create an Express Module from a model path. Required for models with
+    // subgraphs or shape inference that depends on input content.
+    MNN_ModuleEngine *mnnr_create_module_from_file(
+        const char *model_path,
+        const char *const *input_names,
+        size_t input_count,
+        const char *const *output_names,
+        size_t output_count,
+        const MNNR_Config *config);
+
+    void mnnr_destroy_module(MNN_ModuleEngine *module);
+
+    MNNR_ErrorCode mnnr_run_module_named_dynamic(
+        MNN_ModuleEngine *module,
+        const MNNR_NamedInput *inputs,
+        size_t input_count,
+        MNNR_NamedOutput *outputs,
+        size_t output_count);
+
+    const char *mnnr_module_get_last_error(const MNN_ModuleEngine *module);
 
 #ifdef __cplusplus
 }
