@@ -197,7 +197,9 @@ pub struct InferenceEngine {
 impl InferenceEngine {
     pub fn from_buffer(model_buffer: &[u8], config: Option<InferenceConfig>) -> Result<Self> {
         if model_buffer.is_empty() {
-            return Err(MnnError::InvalidParameter("Model data is empty".to_string()));
+            return Err(MnnError::InvalidParameter(
+                "Model data is empty".to_string(),
+            ));
         }
 
         let cfg = config.unwrap_or_default();
@@ -227,18 +229,16 @@ impl InferenceEngine {
         model_path: impl AsRef<std::path::Path>,
         config: Option<InferenceConfig>,
     ) -> Result<Self> {
-        let model_buffer = std::fs::read(model_path.as_ref()).map_err(|e| {
-            MnnError::ModelLoadFailed(format!("Failed to read model file: {}", e))
-        })?;
+        let model_buffer = std::fs::read(model_path.as_ref())
+            .map_err(|e| MnnError::ModelLoadFailed(format!("Failed to read model file: {}", e)))?;
         Self::from_buffer(&model_buffer, config)
     }
 
-    pub fn from_buffer_with_runtime(
-        model_buffer: &[u8],
-        runtime: &SharedRuntime,
-    ) -> Result<Self> {
+    pub fn from_buffer_with_runtime(model_buffer: &[u8], runtime: &SharedRuntime) -> Result<Self> {
         if model_buffer.is_empty() {
-            return Err(MnnError::InvalidParameter("Model data is empty".to_string()));
+            return Err(MnnError::InvalidParameter(
+                "Model data is empty".to_string(),
+            ));
         }
 
         let engine_ptr = unsafe {
@@ -261,9 +261,7 @@ impl InferenceEngine {
         })
     }
 
-    unsafe fn get_shapes(
-        ptr: *mut ffi::MNN_InferenceEngine,
-    ) -> Result<(Vec<usize>, Vec<usize>)> {
+    unsafe fn get_shapes(ptr: *mut ffi::MNN_InferenceEngine) -> Result<(Vec<usize>, Vec<usize>)> {
         let mut input_shape_vec = vec![0usize; 8];
         let mut input_ndims = 0;
         let mut output_shape_vec = vec![0usize; 8];
@@ -306,9 +304,9 @@ impl InferenceEngine {
             });
         }
 
-        let input_slice = input_data
-            .as_slice()
-            .ok_or_else(|| MnnError::InvalidParameter("Input data must be contiguous".to_string()))?;
+        let input_slice = input_data.as_slice().ok_or_else(|| {
+            MnnError::InvalidParameter("Input data must be contiguous".to_string())
+        })?;
 
         let output_size: usize = self.output_shape.iter().product();
         let mut output_buffer = vec![0.0f32; output_size];
@@ -391,9 +389,9 @@ impl InferenceEngine {
 
     pub fn run_dynamic(&self, input_data: ArrayViewD<f32>) -> Result<ArrayD<f32>> {
         let input_shape: Vec<usize> = input_data.shape().to_vec();
-        let input_slice = input_data
-            .as_slice()
-            .ok_or_else(|| MnnError::InvalidParameter("Input data must be contiguous".to_string()))?;
+        let input_slice = input_data.as_slice().ok_or_else(|| {
+            MnnError::InvalidParameter("Input data must be contiguous".to_string())
+        })?;
 
         let mut output_data: *mut f32 = std::ptr::null_mut();
         let mut output_size: usize = 0;
@@ -415,9 +413,9 @@ impl InferenceEngine {
 
         if error_code != ffi::MNNR_ErrorCode_MNNR_SUCCESS {
             return match error_code {
-                ffi::MNNR_ErrorCode_MNNR_ERROR_INVALID_PARAMETER => Err(MnnError::InvalidParameter(
-                    get_last_error_message(Some(self.ptr.as_ptr())),
-                )),
+                ffi::MNNR_ErrorCode_MNNR_ERROR_INVALID_PARAMETER => Err(
+                    MnnError::InvalidParameter(get_last_error_message(Some(self.ptr.as_ptr()))),
+                ),
                 ffi::MNNR_ErrorCode_MNNR_ERROR_OUT_OF_MEMORY => Err(MnnError::OutOfMemory),
                 ffi::MNNR_ErrorCode_MNNR_ERROR_UNSUPPORTED => Err(MnnError::Unsupported),
                 _ => Err(MnnError::RuntimeError(get_last_error_message(Some(
@@ -434,9 +432,8 @@ impl InferenceEngine {
             buffer
         };
 
-        ArrayD::from_shape_vec(IxDyn(&output_shape), output_buffer).map_err(|e| {
-            MnnError::RuntimeError(format!("Failed to create output array: {}", e))
-        })
+        ArrayD::from_shape_vec(IxDyn(&output_shape), output_buffer)
+            .map_err(|e| MnnError::RuntimeError(format!("Failed to create output array: {}", e)))
     }
 
     pub fn run_dynamic_raw(
@@ -464,9 +461,9 @@ impl InferenceEngine {
 
         if error_code != ffi::MNNR_ErrorCode_MNNR_SUCCESS {
             return match error_code {
-                ffi::MNNR_ErrorCode_MNNR_ERROR_INVALID_PARAMETER => Err(MnnError::InvalidParameter(
-                    get_last_error_message(Some(self.ptr.as_ptr())),
-                )),
+                ffi::MNNR_ErrorCode_MNNR_ERROR_INVALID_PARAMETER => Err(
+                    MnnError::InvalidParameter(get_last_error_message(Some(self.ptr.as_ptr()))),
+                ),
                 ffi::MNNR_ErrorCode_MNNR_ERROR_OUT_OF_MEMORY => Err(MnnError::OutOfMemory),
                 _ => Err(MnnError::RuntimeError(get_last_error_message(Some(
                     self.ptr.as_ptr(),
@@ -510,7 +507,9 @@ impl SessionPool {
         config: Option<InferenceConfig>,
     ) -> Result<Self> {
         if pool_size == 0 {
-            return Err(MnnError::InvalidParameter("Pool size cannot be 0".to_string()));
+            return Err(MnnError::InvalidParameter(
+                "Pool size cannot be 0".to_string(),
+            ));
         }
 
         let cfg = config.unwrap_or_default();
@@ -538,9 +537,9 @@ impl SessionPool {
             });
         }
 
-        let input_slice = input_data
-            .as_slice()
-            .ok_or_else(|| MnnError::InvalidParameter("Input data must be contiguous".to_string()))?;
+        let input_slice = input_data.as_slice().ok_or_else(|| {
+            MnnError::InvalidParameter("Input data must be contiguous".to_string())
+        })?;
 
         let output_size: usize = self.output_shape.iter().product();
         let mut output_buffer = vec![0.0f32; output_size];
@@ -561,7 +560,9 @@ impl SessionPool {
                     MnnError::RuntimeError(format!("Failed to create output array: {}", e))
                 })
             }
-            _ => Err(MnnError::RuntimeError("Session pool inference failed".to_string())),
+            _ => Err(MnnError::RuntimeError(
+                "Session pool inference failed".to_string(),
+            )),
         }
     }
 
