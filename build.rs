@@ -82,6 +82,13 @@ fn build_mnn_with_cmake(
 ) -> PathBuf {
     let mut config = cmake::Config::new(mnn_source_dir);
 
+    if os != "windows" {
+        let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set by Cargo");
+        let map_flag = format!("-ffile-prefix-map={}=.", out_dir);
+        config.cflag(&map_flag);
+        config.cxxflag(&map_flag);
+    }
+
     config
         .define("MNN_BUILD_SHARED_LIBS", "OFF")
         .define("MNN_BUILD_TOOLS", "OFF")
