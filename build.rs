@@ -15,6 +15,7 @@ fn main() {
     let opencl_enabled = env::var("CARGO_FEATURE_OPENCL").is_ok();
     let opengl_enabled = env::var("CARGO_FEATURE_OPENGL").is_ok();
     let vulkan_enabled = env::var("CARGO_FEATURE_VULKAN").is_ok();
+    let kleidiai_enabled = env::var("CARGO_FEATURE_KLEIDIAI").is_ok();
 
     let mnn_source_dir = mnn_source_dir(&manifest_dir);
     println!(
@@ -33,6 +34,7 @@ fn main() {
         opencl_enabled,
         opengl_enabled,
         vulkan_enabled,
+        kleidiai_enabled,
     );
 
     let mnn_include_dirs = vec![dst.join("include"), mnn_source_dir.join("include")];
@@ -79,6 +81,7 @@ fn build_mnn_with_cmake(
     opencl_enabled: bool,
     opengl_enabled: bool,
     vulkan_enabled: bool,
+    kleidiai_enabled: bool,
 ) -> PathBuf {
     let mut config = cmake::Config::new(mnn_source_dir);
 
@@ -98,7 +101,12 @@ fn build_mnn_with_cmake(
         .define("MNN_BUILD_QUANTOOLS", "OFF")
         .define("MNN_BUILD_CONVERTER", "OFF")
         .define("MNN_PORTABLE_BUILD", "ON")
-        .define("MNN_SEP_BUILD", "OFF");
+        .define("MNN_SEP_BUILD", "OFF")
+        .define("MNN_KLEIDIAI", if kleidiai_enabled { "ON" } else { "OFF" })
+        .define(
+            "MNN_KLEIDIAI_DEFAULT_ON",
+            if kleidiai_enabled { "ON" } else { "OFF" },
+        );
 
     if os == "windows" {
         config.generator("NMake Makefiles");

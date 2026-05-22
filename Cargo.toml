@@ -16,6 +16,12 @@ vulkan = []
 cuda = []
 coreml = []
 
+# Build & enable Arm KleidiAI ukernels (SME2 / i8mm). Off by default: the
+# kernels only accelerate when (SME2) or (dotprod && i8mm) is present, and
+# they target int8-input x int4-weight matmuls. With this feature OFF the
+# KleidiAI sources are not compiled at all.
+kleidiai = []
+
 [dependencies]
 ndarray = "0.16"
 
