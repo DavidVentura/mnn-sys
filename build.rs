@@ -359,7 +359,9 @@ fn link_libraries(
     if opencl_enabled {
         if os == "macos" {
             println!("cargo:rustc-link-lib=framework=OpenCL");
-        } else {
+        } else if os != "android" {
+            // Android builds use MNN's dlopen wrapper (MNN_USE_LIB_WRAPPER);
+            // libOpenCL.so is a vendor library resolved at runtime.
             println!("cargo:rustc-link-lib=OpenCL");
         }
     }
