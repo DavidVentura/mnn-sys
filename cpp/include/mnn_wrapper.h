@@ -249,6 +249,12 @@ extern "C"
 
     void mnnr_destroy_module(MNN_ModuleEngine *module);
 
+    // Clone an Express Module sharing its weights (one copy of the constant
+    // tensors across all clones). The clone gets a private executor built
+    // from `config` (threads/precision/memory) so clones on different
+    // threads run concurrently instead of serializing on the global one.
+    MNN_ModuleEngine *mnnr_module_clone(MNN_ModuleEngine *src, const MNNR_Config *config);
+
     MNNR_ErrorCode mnnr_run_module_named_dynamic(
         MNN_ModuleEngine *module,
         const MNNR_NamedInput *inputs,

@@ -11,7 +11,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use mnn_sys::{Backend, InferenceConfig, InferenceEngine, MemoryMode, PrecisionMode};
+use mnn_sys::{
+    Backend, InferenceConfig, InferenceEngine, MemoryMode, ModuleEngine, NamedInput,
+    PrecisionMode, TensorData,
+};
 
 const REC_HEIGHT: usize = 48;
 
@@ -330,6 +333,74 @@ fn bench_rec_parallel(rec_path: &Path, strip_w: usize, total: usize, opts: &Opti
     );
 }
 
+/// Same strip workload as `bench_rec_parallel`, but through the Express
+/// Module API with weight-sharing clones: one copy of the constant tensors
+/// backs all workers (vs one full Interpreter + weights per session). Tests
+/// whether the big-cluster parallel ceiling is L3 thrash from N weight
+/// copies.
+fn bench_rec_parallel_module(rec_path: &Path, strip_w: usize, total: usize, opts: &Options) {
+    let n = opts.par_sessions;
+    println!(
+        "\nrec module parallel: {total} strips of {strip_w}x{REC_HEIGHT} across {n} weight-sharing clones"
+    );
+    let config = || {
+        Some(
+            InferenceConfig::new()
+                .with_threads(1)
+                .with_precision(opts.precision)
+                .with_memory(opts.memory),
+        )
+    };
+    let base = ModuleEngine::from_file(rec_path, &["x"], &["fetch_name_0"], config())
+        .expect("load module");
+    let clones: Vec<ModuleEngine> = (0..n)
+        .map(|_| base.clone_shared(config()).expect("clone module"))
+        .collect();
+    let input = pseudo_random_input(3 * REC_HEIGHT * strip_w);
+    let shape = [1usize, 3, REC_HEIGHT, strip_w];
+    let run_one = |engine: &ModuleEngine| {
+        let named = NamedInput {
+            name: "x",
+            data: TensorData::F32(&input),
+            shape: &shape,
+        };
+        engine
+            .run_named_dynamic(&[named], &["fetch_name_0"])
+            .expect("module inference");
+    };
+    for engine in &clones {
+        run_one(engine);
+    }
+
+    let serial_t = Instant::now();
+    for i in 0..total {
+        run_one(&clones[i % n]);
+    }
+    let serial_ms = serial_t.elapsed().as_secs_f32() * 1000.0;
+
+    let queue = AtomicUsize::new(0);
+    let parallel_t = Instant::now();
+    std::thread::scope(|scope| {
+        for engine in &clones {
+            let queue = &queue;
+            let run_one = &run_one;
+            scope.spawn(move || {
+                while queue.fetch_add(1, Ordering::Relaxed) < total {
+                    run_one(engine);
+                }
+            });
+        }
+    });
+    let parallel_ms = parallel_t.elapsed().as_secs_f32() * 1000.0;
+
+    println!(
+        "  serial={serial_ms:.1}ms ({:.1}ms/strip)  parallel={parallel_ms:.1}ms ({:.1}ms/strip)  speedup={:.2}x",
+        serial_ms / total as f32,
+        parallel_ms / total as f32,
+        serial_ms / parallel_ms
+    );
+}
+
 fn print_profile(label: &str, rows: &[(String, String, f64, f64, String)]) {
     let total: f64 = rows.iter().map(|r| r.2).sum();
     println!("\nprofile {label}: {:.1}ms total across {} ops", total, rows.len());
@@ -498,5 +569,8 @@ fn main() {
     if matches!(opts.section.as_str(), "par" | "all") {
         // 71 strips at ~544 wide matches what the reference screenshot produces.
         bench_rec_parallel(rec_path, 544, 71, &opts);
+    }
+    if opts.section == "modpar" {
+        bench_rec_parallel_module(rec_path, 544, 71, &opts);
     }
 }

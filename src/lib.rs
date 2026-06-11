@@ -346,6 +346,18 @@ impl ModuleEngine {
         Ok(Self { ptr })
     }
 
+    /// Clone this module sharing its weights: one copy of the constant
+    /// tensors backs all clones, and each clone gets a private executor so
+    /// clones on different threads run concurrently.
+    pub fn clone_shared(&self, config: Option<InferenceConfig>) -> Result<Self> {
+        let cfg = config.unwrap_or_default();
+        let c_config = cfg.to_ffi();
+        let module_ptr = unsafe { ffi::mnnr_module_clone(self.ptr.as_ptr(), &c_config) };
+        let ptr = NonNull::new(module_ptr)
+            .ok_or_else(|| MnnError::RuntimeError("Module clone failed".to_string()))?;
+        Ok(Self { ptr })
+    }
+
     pub fn run_named_dynamic(
         &self,
         inputs: &[NamedInput<'_>],
