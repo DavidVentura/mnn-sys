@@ -221,6 +221,20 @@ extern "C"
     // Free output buffer allocated by mnnr_run_inference_dynamic
     void mnnr_free_output(float *output_data);
 
+    // Run inference `iters` times with per-operator timing callbacks and
+    // return a report: one op per line, tab-separated
+    // "type\tname\tavg_ms\tflops_m\tout_shape", ordered by descending time.
+    // Caller frees the report with mnnr_free_report.
+    MNNR_ErrorCode mnnr_run_profile(
+        MNN_InferenceEngine *engine,
+        const float *input_data,
+        const size_t *input_dims,
+        size_t input_ndims,
+        int iters,
+        char **report_out);
+
+    void mnnr_free_report(char *report);
+
     // ============== Express Module API ==============
 
     // Create an Express Module from a model path. Required for models with

@@ -24,6 +24,7 @@ kleidiai = []
 
 [dependencies]
 ndarray = "0.16"
+libc = "0.2"
 
 [build-dependencies]
 cmake = "0.1"

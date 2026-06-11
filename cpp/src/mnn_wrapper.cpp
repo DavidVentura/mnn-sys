@@ -16,6 +16,9 @@
 #include <string>
 #include <memory>
 #include <map>
+#include <chrono>
+#include <algorithm>
+#include <cstdio>
 
 #if OCR_RS_FORCE_VULKAN_LINK
 #include "VulkanRuntime.hpp"
@@ -870,6 +873,121 @@ MNNR_ErrorCode mnnr_run_inference_dynamic(
 void mnnr_free_output(float *output_data)
 {
     delete[] output_data;
+}
+
+MNNR_ErrorCode mnnr_run_profile(
+    MNN_InferenceEngine *engine,
+    const float *input_data,
+    const size_t *input_dims,
+    size_t input_ndims,
+    int iters,
+    char **report_out)
+{
+    if (!engine || !input_data || !input_dims || iters <= 0 || !report_out)
+    {
+        return MNNR_ERROR_INVALID_PARAMETER;
+    }
+
+    std::lock_guard<std::mutex> lock(engine->mutex);
+
+    std::vector<int> new_shape(input_ndims);
+    size_t total_input_size = 1;
+    for (size_t i = 0; i < input_ndims; i++)
+    {
+        new_shape[i] = static_cast<int>(input_dims[i]);
+        total_input_size *= input_dims[i];
+    }
+    engine->interpreter->resizeTensor(engine->input_tensor, new_shape);
+    engine->interpreter->resizeSession(engine->default_session);
+    auto input_map = engine->interpreter->getSessionInputAll(engine->default_session);
+    if (input_map.empty())
+    {
+        engine->last_error = "No input tensors found after resize";
+        return MNNR_ERROR_RUNTIME_ERROR;
+    }
+    engine->input_tensor = input_map.begin()->second;
+    auto input_host = make_unique_ptr<MNN::Tensor>(engine->input_tensor, MNN::Tensor::CAFFE);
+    std::memcpy(input_host->host<float>(), input_data, total_input_size * sizeof(float));
+    engine->input_tensor->copyFromHostTensor(input_host.get());
+
+    // Warmup outside the timed iterations (lazy allocations, first-touch).
+    if (engine->interpreter->runSession(engine->default_session) != MNN::NO_ERROR)
+    {
+        engine->last_error = "Profile warmup failed";
+        return MNNR_ERROR_RUNTIME_ERROR;
+    }
+
+    struct OpStat
+    {
+        std::string type;
+        std::string shape;
+        double total_ms = 0.0;
+        float flops_m = 0.0f;
+    };
+    std::map<std::string, OpStat> stats;
+    std::chrono::steady_clock::time_point op_start;
+
+    MNN::TensorCallBackWithInfo before =
+        [&op_start](const std::vector<MNN::Tensor *> &, const MNN::OperatorInfo *)
+    {
+        op_start = std::chrono::steady_clock::now();
+        return true;
+    };
+    MNN::TensorCallBackWithInfo after =
+        [&op_start, &stats](const std::vector<MNN::Tensor *> &outputs, const MNN::OperatorInfo *info)
+    {
+        auto elapsed = std::chrono::steady_clock::now() - op_start;
+        OpStat &stat = stats[info->name()];
+        stat.type = info->type();
+        stat.total_ms += std::chrono::duration<double, std::milli>(elapsed).count();
+        stat.flops_m = info->flops();
+        if (stat.shape.empty() && !outputs.empty() && outputs[0])
+        {
+            for (int d : outputs[0]->shape())
+            {
+                if (!stat.shape.empty())
+                {
+                    stat.shape += "x";
+                }
+                stat.shape += std::to_string(d);
+            }
+        }
+        return true;
+    };
+
+    for (int i = 0; i < iters; i++)
+    {
+        MNN::ErrorCode code = engine->interpreter->runSessionWithCallBackInfo(
+            engine->default_session, before, after, true);
+        if (code != MNN::NO_ERROR)
+        {
+            engine->last_error = "Profiled inference failed";
+            return MNNR_ERROR_RUNTIME_ERROR;
+        }
+    }
+
+    std::vector<std::pair<std::string, OpStat>> rows(stats.begin(), stats.end());
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b)
+              { return a.second.total_ms > b.second.total_ms; });
+    std::string report;
+    char line[512];
+    for (const auto &row : rows)
+    {
+        snprintf(line, sizeof(line), "%s\t%s\t%.4f\t%.3f\t%s\n",
+                 row.second.type.c_str(), row.first.c_str(),
+                 row.second.total_ms / iters, row.second.flops_m,
+                 row.second.shape.c_str());
+        report += line;
+    }
+    char *out = new char[report.size() + 1];
+    std::memcpy(out, report.c_str(), report.size() + 1);
+    *report_out = out;
+    return MNNR_SUCCESS;
+}
+
+void mnnr_free_report(char *report)
+{
+    delete[] report;
 }
 
 // ============== Express Module API ==============

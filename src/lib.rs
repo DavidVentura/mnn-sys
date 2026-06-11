@@ -725,6 +725,51 @@ impl InferenceEngine {
             || self.output_shape.iter().any(|&d| d > 100000)
     }
 
+    /// Run `iters` profiled inferences and return per-operator timing rows
+    /// (op type, op name, avg ms, MFLOPs, output shape), ordered by
+    /// descending time.
+    pub fn run_profile(
+        &self,
+        input: &[f32],
+        input_shape: &[usize],
+        iters: usize,
+    ) -> Result<Vec<(String, String, f64, f64, String)>> {
+        let mut report: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let error_code = unsafe {
+            ffi::mnnr_run_profile(
+                self.ptr.as_ptr(),
+                input.as_ptr(),
+                input_shape.as_ptr(),
+                input_shape.len(),
+                iters as i32,
+                &mut report,
+            )
+        };
+        if error_code != ffi::MNNR_ErrorCode_MNNR_SUCCESS {
+            return Err(MnnError::RuntimeError(get_last_error_message(Some(
+                self.ptr.as_ptr(),
+            ))));
+        }
+        let text = unsafe {
+            let s = std::ffi::CStr::from_ptr(report).to_string_lossy().into_owned();
+            ffi::mnnr_free_report(report);
+            s
+        };
+        let rows = text
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split('\t');
+                let ty = parts.next()?.to_string();
+                let name = parts.next()?.to_string();
+                let ms: f64 = parts.next()?.parse().ok()?;
+                let mflops: f64 = parts.next()?.parse().ok()?;
+                let shape = parts.next().unwrap_or("").to_string();
+                Some((ty, name, ms, mflops, shape))
+            })
+            .collect();
+        Ok(rows)
+    }
+
     pub fn run_dynamic(&self, input_data: ArrayViewD<f32>) -> Result<ArrayD<f32>> {
         let input_shape: Vec<usize> = input_data.shape().to_vec();
         let input_slice = input_data.as_slice().ok_or_else(|| {
