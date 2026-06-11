@@ -401,12 +401,25 @@ fn bench_rec_parallel_module(rec_path: &Path, strip_w: usize, total: usize, opts
     );
 }
 
-fn print_profile(label: &str, rows: &[(String, String, f64, f64, String)]) {
+fn print_profile(label: &str, rows: &[(String, String, f64, f64, String, String)]) {
     let total: f64 = rows.iter().map(|r| r.2).sum();
     println!("\nprofile {label}: {:.1}ms total across {} ops", total, rows.len());
 
+    let mut by_dtype: std::collections::HashMap<&str, (f64, usize)> = std::collections::HashMap::new();
+    for (_, _, ms, _, _, dtype) in rows {
+        let e = by_dtype.entry(dtype).or_default();
+        e.0 += ms;
+        e.1 += 1;
+    }
+    let mut dtypes: Vec<_> = by_dtype.into_iter().collect();
+    dtypes.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));
+    println!("{:>16} {:>8} {:>9} {:>6}", "out dtype", "ms", "share", "count");
+    for (dtype, (ms, count)) in &dtypes {
+        println!("{:>16} {:>8.1} {:>8.1}% {:>6}", dtype, ms, ms / total * 100.0, count);
+    }
+
     let mut by_type: std::collections::HashMap<&str, (f64, usize)> = std::collections::HashMap::new();
-    for (ty, _, ms, _, _) in rows {
+    for (ty, _, ms, _, _, _) in rows {
         let e = by_type.entry(ty).or_default();
         e.0 += ms;
         e.1 += 1;
@@ -420,17 +433,18 @@ fn print_profile(label: &str, rows: &[(String, String, f64, f64, String)]) {
 
     println!("top ops:");
     println!(
-        "{:>14} {:>8} {:>7} {:>9} {:>18}  name",
-        "type", "ms", "share", "GFLOP/s", "out shape"
+        "{:>14} {:>8} {:>7} {:>9} {:>18} {:>6}  name",
+        "type", "ms", "share", "GFLOP/s", "out shape", "dtype"
     );
-    for (ty, name, ms, mflops, shape) in rows.iter().take(25) {
+    for (ty, name, ms, mflops, shape, dtype) in rows.iter().take(25) {
         println!(
-            "{:>14} {:>8.2} {:>6.1}% {:>9.1} {:>18}  {}",
+            "{:>14} {:>8.2} {:>6.1}% {:>9.1} {:>18} {:>6}  {}",
             ty,
             ms,
             ms / total * 100.0,
             mflops / ms,
             shape,
+            dtype,
             name
         );
     }

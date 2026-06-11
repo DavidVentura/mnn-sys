@@ -738,14 +738,14 @@ impl InferenceEngine {
     }
 
     /// Run `iters` profiled inferences and return per-operator timing rows
-    /// (op type, op name, avg ms, MFLOPs, output shape), ordered by
-    /// descending time.
+    /// (op type, op name, avg ms, MFLOPs, output shape, output dtype),
+    /// ordered by descending time.
     pub fn run_profile(
         &self,
         input: &[f32],
         input_shape: &[usize],
         iters: usize,
-    ) -> Result<Vec<(String, String, f64, f64, String)>> {
+    ) -> Result<Vec<(String, String, f64, f64, String, String)>> {
         let mut report: *mut std::os::raw::c_char = std::ptr::null_mut();
         let error_code = unsafe {
             ffi::mnnr_run_profile(
@@ -776,7 +776,8 @@ impl InferenceEngine {
                 let ms: f64 = parts.next()?.parse().ok()?;
                 let mflops: f64 = parts.next()?.parse().ok()?;
                 let shape = parts.next().unwrap_or("").to_string();
-                Some((ty, name, ms, mflops, shape))
+                let dtype = parts.next().unwrap_or("").to_string();
+                Some((ty, name, ms, mflops, shape, dtype))
             })
             .collect();
         Ok(rows)

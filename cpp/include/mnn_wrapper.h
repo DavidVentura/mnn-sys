@@ -223,7 +223,7 @@ extern "C"
 
     // Run inference `iters` times with per-operator timing callbacks and
     // return a report: one op per line, tab-separated
-    // "type\tname\tavg_ms\tflops_m\tout_shape", ordered by descending time.
+    // "type\tname\tavg_ms\tflops_m\tout_shape\tout_dtype", ordered by descending time.
     // Caller frees the report with mnnr_free_report.
     MNNR_ErrorCode mnnr_run_profile(
         MNN_InferenceEngine *engine,

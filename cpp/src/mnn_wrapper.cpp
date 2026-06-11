@@ -925,6 +925,7 @@ MNNR_ErrorCode mnnr_run_profile(
     {
         std::string type;
         std::string shape;
+        std::string dtype;
         double total_ms = 0.0;
         float flops_m = 0.0f;
     };
@@ -955,6 +956,12 @@ MNNR_ErrorCode mnnr_run_profile(
                 }
                 stat.shape += std::to_string(d);
             }
+            auto t = outputs[0]->getType();
+            const char *code = t.code == halide_type_float ? "f"
+                               : t.code == halide_type_int ? "i"
+                               : t.code == halide_type_uint ? "u"
+                                                            : "?";
+            stat.dtype = code + std::to_string(t.bits);
         }
         return true;
     };
@@ -977,10 +984,10 @@ MNNR_ErrorCode mnnr_run_profile(
     char line[512];
     for (const auto &row : rows)
     {
-        snprintf(line, sizeof(line), "%s\t%s\t%.4f\t%.3f\t%s\n",
+        snprintf(line, sizeof(line), "%s\t%s\t%.4f\t%.3f\t%s\t%s\n",
                  row.second.type.c_str(), row.first.c_str(),
                  row.second.total_ms / iters, row.second.flops_m,
-                 row.second.shape.c_str());
+                 row.second.shape.c_str(), row.second.dtype.c_str());
         report += line;
     }
     char *out = new char[report.size() + 1];
