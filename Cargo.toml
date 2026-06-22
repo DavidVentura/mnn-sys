@@ -8,6 +8,11 @@ license = "Apache-2.0"
 [features]
 default = []
 
+# Build the ONNX -> MNN converter into the library and expose
+# mnnr_convert_onnx_to_mnn. Pulls in MNN's converter frontend + bundled
+# protobuf; only the ONNX frontend is compiled.
+converter = []
+
 # GPU backends
 metal = []
 opencl = []

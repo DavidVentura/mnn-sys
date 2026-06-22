@@ -244,6 +244,17 @@ extern "C"
 
     const char *mnnr_module_get_last_error(const MNN_ModuleEngine *module);
 
+#ifdef MNN_WRAPPER_CONVERTER
+    // Convert an ONNX model file to an MNN model file. weight_quant_bits > 0
+    // enables weight-only quantization (8 matches the offline pipeline);
+    // biz_code may be NULL to use the MNN default.
+    MNNR_ErrorCode mnnr_convert_onnx_to_mnn(
+        const char *onnx_path,
+        const char *mnn_path,
+        int weight_quant_bits,
+        const char *biz_code);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

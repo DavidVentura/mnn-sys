@@ -1135,3 +1135,31 @@ const char *mnnr_module_get_last_error(const MNN_ModuleEngine *module)
     }
     return module->last_error.c_str();
 }
+
+#ifdef MNN_WRAPPER_CONVERTER
+#include "cli.hpp"
+#include "config.hpp"
+
+MNNR_ErrorCode mnnr_convert_onnx_to_mnn(
+    const char *onnx_path,
+    const char *mnn_path,
+    int weight_quant_bits,
+    const char *biz_code)
+{
+    if (onnx_path == nullptr || mnn_path == nullptr)
+    {
+        return MNNR_ERROR_INVALID_PARAMETER;
+    }
+    modelConfig config;
+    config.model = modelConfig::ONNX;
+    config.modelFile = onnx_path;
+    config.MNNModel = mnn_path;
+    config.weightQuantBits = weight_quant_bits;
+    if (biz_code != nullptr)
+    {
+        config.bizCode = biz_code;
+    }
+    bool ok = MNN::Cli::convertModel(config);
+    return ok ? MNNR_SUCCESS : MNNR_ERROR_MODEL_LOAD_FAILED;
+}
+#endif

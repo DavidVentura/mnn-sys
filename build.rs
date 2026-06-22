@@ -16,6 +16,7 @@ fn main() {
     let opengl_enabled = env::var("CARGO_FEATURE_OPENGL").is_ok();
     let vulkan_enabled = env::var("CARGO_FEATURE_VULKAN").is_ok();
     let kleidiai_enabled = env::var("CARGO_FEATURE_KLEIDIAI").is_ok();
+    let converter_enabled = env::var("CARGO_FEATURE_CONVERTER").is_ok();
 
     let mnn_source_dir = mnn_source_dir(&manifest_dir);
     println!(
@@ -35,12 +36,19 @@ fn main() {
         opengl_enabled,
         vulkan_enabled,
         kleidiai_enabled,
+        converter_enabled,
     );
 
     let mnn_include_dirs = vec![dst.join("include"), mnn_source_dir.join("include")];
     let mnn_lib_dirs = vec![dst.clone(), dst.join("lib")];
 
-    build_wrapper(&manifest_dir, &mnn_include_dirs, &os, vulkan_enabled);
+    build_wrapper(
+        &manifest_dir,
+        &mnn_include_dirs,
+        &os,
+        vulkan_enabled,
+        converter_enabled,
+    );
 
     link_libraries(
         &mnn_lib_dirs,
@@ -51,9 +59,20 @@ fn main() {
         opencl_enabled,
         opengl_enabled,
         vulkan_enabled,
+        converter_enabled,
     );
 
-    bind_gen(&manifest_dir, &mnn_include_dirs, &os, &arch);
+    if converter_enabled {
+        link_converter(&dst);
+    }
+
+    bind_gen(
+        &manifest_dir,
+        &mnn_include_dirs,
+        &os,
+        &arch,
+        converter_enabled,
+    );
 }
 
 /// Return the path to the vendored MNN source tree. The submodule under
@@ -82,6 +101,7 @@ fn build_mnn_with_cmake(
     opengl_enabled: bool,
     vulkan_enabled: bool,
     kleidiai_enabled: bool,
+    converter_enabled: bool,
 ) -> PathBuf {
     let mut config = cmake::Config::new(mnn_source_dir);
 
@@ -99,7 +119,15 @@ fn build_mnn_with_cmake(
         .define("MNN_BUILD_TEST", "OFF")
         .define("MNN_BUILD_BENCHMARK", "OFF")
         .define("MNN_BUILD_QUANTOOLS", "OFF")
-        .define("MNN_BUILD_CONVERTER", "OFF")
+        .define("MNN_BUILD_CONVERTER", if converter_enabled { "ON" } else { "OFF" })
+        .define("MNN_BUILD_CONVERTER_ONNX", "ON")
+        .define("MNN_BUILD_CONVERTER_TENSORFLOW", "OFF")
+        .define("MNN_BUILD_CONVERTER_CAFFE", "OFF")
+        .define("MNN_BUILD_CONVERTER_TFLITE", "OFF")
+        .define(
+            "MNN_BUILD_PROTOBUFFER",
+            if converter_enabled { "ON" } else { "OFF" },
+        )
         .define("MNN_PORTABLE_BUILD", "ON")
         .define("MNN_SEP_BUILD", "OFF")
         .define("MNN_KLEIDIAI", if kleidiai_enabled { "ON" } else { "OFF" })
@@ -240,6 +268,7 @@ fn build_wrapper(
     mnn_include_dirs: &[PathBuf],
     os: &str,
     vulkan_enabled: bool,
+    converter_enabled: bool,
 ) {
     let wrapper_file = manifest_dir.join("cpp/src/mnn_wrapper.cpp");
 
@@ -255,6 +284,11 @@ fn build_wrapper(
 
     for inc in mnn_include_dirs {
         build.include(inc);
+    }
+
+    if converter_enabled {
+        build.include(manifest_dir.join("3rd_party/MNN/tools/converter/include"));
+        build.define("MNN_WRAPPER_CONVERTER", Some("1"));
     }
 
     build.define("OCR_RS_FORCE_VULKAN_LINK", Some("0"));
@@ -313,15 +347,21 @@ fn link_libraries(
     opencl_enabled: bool,
     opengl_enabled: bool,
     vulkan_enabled: bool,
+    converter_enabled: bool,
 ) {
     for dir in lib_dirs {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
 
-    // whole-archive: keep MNN backend runtime creators registered via static init.
-    println!("cargo:rustc-link-arg=-Wl,--whole-archive");
-    println!("cargo:rustc-link-lib=static=MNN");
-    println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
+    // whole-archive: keep MNN backend runtime creators registered via static
+    // init. When the converter is enabled, link_converter whole-archives libMNN
+    // by full path together with MNNConvertDeps instead, so skip it here to
+    // avoid linking MNN twice.
+    if !converter_enabled {
+        println!("cargo:rustc-link-arg=-Wl,--whole-archive");
+        println!("cargo:rustc-link-lib=static=MNN");
+        println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
+    }
 
     match os {
         "macos" | "ios" => {
@@ -378,7 +418,62 @@ fn link_libraries(
     }
 }
 
-fn bind_gen(manifest_dir: &Path, mnn_include_dirs: &[PathBuf], os: &str, arch: &str) {
+fn link_converter(dst: &Path) {
+    let convert_deps = find_archive(dst, "MNNConvertDeps");
+    let mnn = find_archive(dst, "MNN");
+    let protobuf = find_archive(dst, "protobuf");
+
+    // Pass the archives as positional link-args (by full path) rather than as
+    // `-l` libs: rustc groups all `-C link-arg` flags together and separately
+    // from `-l` libs, so a `--whole-archive` emitted as a link-arg would not
+    // wrap any `-l` lib. The ONNX op converters and optimizer passes only
+    // self-register via static initializers, so they must be whole-archived or
+    // the linker drops them (conversion then emits empty/unknown ops).
+    // MNNConvertDeps' references into MNN resolve because libMNN is whole-
+    // archived in the same group; protobuf follows to satisfy its references.
+    println!("cargo:rustc-link-arg=-Wl,--whole-archive");
+    println!("cargo:rustc-link-arg={}", convert_deps.display());
+    println!("cargo:rustc-link-arg={}", mnn.display());
+    println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
+    println!("cargo:rustc-link-arg={}", protobuf.display());
+}
+
+// protobuf appends a "d" postfix to its archive in Debug builds; resolve the
+// concrete archive path (release or debug name).
+fn find_archive(root: &Path, base: &str) -> PathBuf {
+    for candidate in [format!("lib{base}.a"), format!("lib{base}d.a")] {
+        if let Some(path) = find_file(root, &candidate) {
+            return path;
+        }
+    }
+    panic!("archive lib{base}[d].a not found under {}", root.display());
+}
+
+fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            dirs.push(path);
+        } else if path.file_name().map_or(false, |f| f == name) {
+            return Some(path);
+        }
+    }
+    for dir in dirs {
+        if let Some(found) = find_file(&dir, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn bind_gen(
+    manifest_dir: &Path,
+    mnn_include_dirs: &[PathBuf],
+    os: &str,
+    arch: &str,
+    converter_enabled: bool,
+) {
     let header_path = manifest_dir.join("cpp/include/mnn_wrapper.h");
 
     let mut builder = bindgen::Builder::default()
@@ -388,6 +483,10 @@ fn bind_gen(manifest_dir: &Path, mnn_include_dirs: &[PathBuf], os: &str, arch: &
         .allowlist_type("MNNR.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .layout_tests(false);
+
+    if converter_enabled {
+        builder = builder.clang_arg("-DMNN_WRAPPER_CONVERTER=1");
+    }
 
     for inc in mnn_include_dirs {
         builder = builder.clang_arg(format!("-I{}", inc.display()));

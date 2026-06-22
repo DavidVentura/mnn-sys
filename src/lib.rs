@@ -920,6 +920,59 @@ impl Drop for SessionPool {
 unsafe impl Send for SessionPool {}
 unsafe impl Sync for SessionPool {}
 
+#[cfg(feature = "converter")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightQuant {
+    None,
+    Bits(u8),
+}
+
+#[cfg(feature = "converter")]
+impl WeightQuant {
+    fn as_bits(self) -> i32 {
+        match self {
+            WeightQuant::None => 0,
+            WeightQuant::Bits(bits) => bits as i32,
+        }
+    }
+}
+
+#[cfg(feature = "converter")]
+pub fn convert_onnx_to_mnn(
+    onnx_path: &std::path::Path,
+    mnn_path: &std::path::Path,
+    weight_quant: WeightQuant,
+) -> Result<()> {
+    let onnx = path_to_cstring(onnx_path)?;
+    let mnn = path_to_cstring(mnn_path)?;
+    let code = unsafe {
+        ffi::mnnr_convert_onnx_to_mnn(
+            onnx.as_ptr(),
+            mnn.as_ptr(),
+            weight_quant.as_bits(),
+            std::ptr::null(),
+        )
+    };
+    match code {
+        ffi::MNNR_ErrorCode_MNNR_SUCCESS => Ok(()),
+        ffi::MNNR_ErrorCode_MNNR_ERROR_INVALID_PARAMETER => {
+            Err(MnnError::InvalidParameter("null model path".to_string()))
+        }
+        _ => Err(MnnError::ModelLoadFailed(format!(
+            "ONNX -> MNN conversion failed for {}",
+            onnx_path.display()
+        ))),
+    }
+}
+
+#[cfg(feature = "converter")]
+fn path_to_cstring(path: &std::path::Path) -> Result<CString> {
+    let s = path
+        .to_str()
+        .ok_or_else(|| MnnError::InvalidParameter(format!("non-UTF-8 path {}", path.display())))?;
+    CString::new(s).map_err(|_| MnnError::InvalidParameter(format!("path with NUL {}", path.display())))
+}
+
 pub fn get_version() -> String {
     unsafe {
         let c_str = ffi::mnnr_get_version();
