@@ -188,6 +188,24 @@ fn build_mnn_with_cmake(
             }
             _ => {}
         }
+
+        // MNN's converter executables (MNNConvert and friends) hardcode
+        // `-lpthread`, but the Android NDK has no libpthread — pthread lives in
+        // libc. Drop an empty stub archive on the link path so those exes link;
+        // we don't use them, but the converter's `all`/install build also builds
+        // them, and building only the lib target doesn't build libMNN (its
+        // static `add_dependencies(MNNConvertDeps MNN)` is missing). The `-L`
+        // goes through the compiler driver (which performs the link), so it
+        // appends rather than clobbering the toolchain's CMAKE_EXE_LINKER_FLAGS.
+        if converter_enabled {
+            let stub_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"))
+                .join("pthread_stub");
+            fs::create_dir_all(&stub_dir).expect("create pthread stub dir");
+            fs::write(stub_dir.join("libpthread.a"), b"!<arch>\n").expect("write pthread stub");
+            let lflag = format!("-L{}", stub_dir.display());
+            config.cflag(&lflag);
+            config.cxxflag(&lflag);
+        }
     }
 
     if os == "ios" {
@@ -260,6 +278,7 @@ fn build_mnn_with_cmake(
     if vulkan_enabled {
         config.define("MNN_VULKAN", "ON");
     }
+
     config.build()
 }
 
@@ -423,19 +442,36 @@ fn link_converter(dst: &Path) {
     let mnn = find_archive(dst, "MNN");
     let protobuf = find_archive(dst, "protobuf");
 
-    // Pass the archives as positional link-args (by full path) rather than as
-    // `-l` libs: rustc groups all `-C link-arg` flags together and separately
-    // from `-l` libs, so a `--whole-archive` emitted as a link-arg would not
-    // wrap any `-l` lib. The ONNX op converters and optimizer passes only
-    // self-register via static initializers, so they must be whole-archived or
-    // the linker drops them (conversion then emits empty/unknown ops).
-    // MNNConvertDeps' references into MNN resolve because libMNN is whole-
-    // archived in the same group; protobuf follows to satisfy its references.
-    println!("cargo:rustc-link-arg=-Wl,--whole-archive");
-    println!("cargo:rustc-link-arg={}", convert_deps.display());
-    println!("cargo:rustc-link-arg={}", mnn.display());
-    println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
-    println!("cargo:rustc-link-arg={}", protobuf.display());
+    // Emit propagating `rustc-link-lib` (with the `+whole-archive` modifier)
+    // rather than positional `rustc-link-arg`: link-args do not propagate to a
+    // dependent crate's final binary/cdylib, so a downstream consumer would link
+    // without these archives and fail on `MNN::Cli::convertModel`. The ONNX op
+    // converters and optimizer passes self-register via static initializers, so
+    // MNNConvertDeps and MNN must be whole-archived or the linker drops them
+    // (conversion then emits empty/unknown ops); protobuf follows to satisfy its
+    // references and needs no whole-archive.
+    link_archive(&convert_deps, WholeArchive::Yes);
+    link_archive(&mnn, WholeArchive::Yes);
+    link_archive(&protobuf, WholeArchive::No);
+}
+
+enum WholeArchive {
+    Yes,
+    No,
+}
+
+fn link_archive(archive: &Path, whole_archive: WholeArchive) {
+    let dir = archive.parent().expect("archive has a parent directory");
+    let name = archive
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.strip_prefix("lib"))
+        .expect("archive is named lib<name>.a");
+    println!("cargo:rustc-link-search=native={}", dir.display());
+    match whole_archive {
+        WholeArchive::Yes => println!("cargo:rustc-link-lib=static:+whole-archive={name}"),
+        WholeArchive::No => println!("cargo:rustc-link-lib=static={name}"),
+    }
 }
 
 // protobuf appends a "d" postfix to its archive in Debug builds; resolve the
