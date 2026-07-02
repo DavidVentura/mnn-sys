@@ -2,6 +2,8 @@
 #include <MNN/Interpreter.hpp>
 #include <MNN/Tensor.hpp>
 #include <MNN/MNNDefine.h>
+#include <MNN/expr/Executor.hpp>
+#include <MNN/expr/ExecutorScope.hpp>
 #include <MNN/expr/Expr.hpp>
 #include <MNN/expr/ExprCreator.hpp>
 #include <MNN/expr/MathOp.hpp>
@@ -94,6 +96,13 @@ struct MNN_SessionPool
 
 struct MNN_ModuleEngine
 {
+    // Modules bound to the same Executor share one CPURuntime and thus one
+    // DeferBufferAllocator arena; Module::destroy gc(FULL)s that arena under
+    // any concurrently running forward (use-after-free), and two concurrent
+    // forwards alias the same arena bytes. A private Executor per engine,
+    // entered via ExecutorScope around load/forward/destroy, isolates each
+    // module as the MNN multi-instance docs prescribe.
+    std::shared_ptr<MNN::Express::Executor> executor;
     std::shared_ptr<MNN::Express::Executor::RuntimeManager> runtime_manager;
     std::shared_ptr<MNN::Express::Module> module;
     std::vector<std::string> input_names;
@@ -103,6 +112,12 @@ struct MNN_ModuleEngine
     std::string last_error;
 
     MNN_ModuleEngine() : input_format(MNN::Express::NCHW) {}
+    ~MNN_ModuleEngine()
+    {
+        MNN::Express::ExecutorScope scope(executor);
+        module.reset();
+        runtime_manager.reset();
+    }
 };
 
 // ============== Helper Functions ==============
@@ -898,6 +913,14 @@ MNN_ModuleEngine *mnnr_create_module_from_file(
     }
 
     auto schedule = create_schedule_config(config);
+    engine->executor = MNN::Express::Executor::newExecutor(
+        schedule.schedule_config.type, schedule.backend_config, schedule.schedule_config.numThread);
+    if (!engine->executor)
+    {
+        delete engine;
+        return nullptr;
+    }
+    MNN::Express::ExecutorScope scope(engine->executor);
     engine->runtime_manager.reset(
         MNN::Express::Executor::RuntimeManager::createRuntimeManager(schedule.schedule_config));
     if (!engine->runtime_manager)
@@ -1022,6 +1045,7 @@ MNNR_ErrorCode mnnr_run_module_named_dynamic(
     }
 
     std::lock_guard<std::mutex> lock(module->mutex);
+    MNN::Express::ExecutorScope scope(module->executor);
 
     std::map<std::string, const MNNR_NamedInput *> input_map;
     for (size_t i = 0; i < input_count; i++)
