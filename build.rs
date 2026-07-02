@@ -23,6 +23,10 @@ fn main() {
         "cargo:rerun-if-changed={}",
         mnn_source_dir.join("CMakeLists.txt").display()
     );
+    // Without this, editing any MNN .cpp/.h/.S does not re-run this build script,
+    // so cargo reuses the cached libMNN.a and the edits (e.g. instrumentation)
+    // never land. Watch every source file under the MNN tree.
+    emit_rerun_for_sources(&mnn_source_dir.join("source"));
 
     let dst = build_mnn_with_cmake(
         &mnn_source_dir,
@@ -89,6 +93,29 @@ fn mnn_source_dir(manifest_dir: &Path) -> PathBuf {
     path
 }
 
+/// Emit `cargo:rerun-if-changed` for every C/C++/asm/header source under `dir`,
+/// recursively. cargo does not reliably watch directory contents, so each file is
+/// listed explicitly; otherwise edits to MNN sources are not picked up.
+fn emit_rerun_for_sources(dir: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            emit_rerun_for_sources(&path);
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if matches!(
+                ext,
+                "cpp" | "cc" | "c" | "S" | "s" | "h" | "hpp" | "hxx" | "inl"
+            ) {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+}
+
 fn build_mnn_with_cmake(
     mnn_source_dir: &Path,
     arch: &str,
@@ -119,7 +146,10 @@ fn build_mnn_with_cmake(
         .define("MNN_BUILD_TEST", "OFF")
         .define("MNN_BUILD_BENCHMARK", "OFF")
         .define("MNN_BUILD_QUANTOOLS", "OFF")
-        .define("MNN_BUILD_CONVERTER", if converter_enabled { "ON" } else { "OFF" })
+        .define(
+            "MNN_BUILD_CONVERTER",
+            if converter_enabled { "ON" } else { "OFF" },
+        )
         .define("MNN_BUILD_CONVERTER_ONNX", "ON")
         .define("MNN_BUILD_CONVERTER_TENSORFLOW", "OFF")
         .define("MNN_BUILD_CONVERTER_CAFFE", "OFF")
@@ -198,8 +228,8 @@ fn build_mnn_with_cmake(
         // goes through the compiler driver (which performs the link), so it
         // appends rather than clobbering the toolchain's CMAKE_EXE_LINKER_FLAGS.
         if converter_enabled {
-            let stub_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"))
-                .join("pthread_stub");
+            let stub_dir =
+                PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set")).join("pthread_stub");
             fs::create_dir_all(&stub_dir).expect("create pthread stub dir");
             fs::write(stub_dir.join("libpthread.a"), b"!<arch>\n").expect("write pthread stub");
             let lflag = format!("-L{}", stub_dir.display());
