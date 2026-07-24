@@ -167,7 +167,16 @@ fn build_mnn_with_cmake(
         );
 
     if os == "windows" {
-        config.generator("NMake Makefiles");
+        // Native MSVC builds use NMake; clang-cl cross builds (cargo-xwin) have
+        // no nmake or Visual Studio and export CMAKE_GENERATOR=Ninja — honor it.
+        match env::var("CMAKE_GENERATOR") {
+            Ok(generator) if !generator.is_empty() => {
+                config.generator(generator);
+            }
+            _ => {
+                config.generator("NMake Makefiles");
+            }
+        }
         config.define("CMAKE_BUILD_TYPE", "Release");
         if env::var("CARGO_CFG_TARGET_FEATURE").map_or(false, |f| f.contains("crt-static")) {
             config.define("MNN_WIN_RUNTIME_MT", "ON");
