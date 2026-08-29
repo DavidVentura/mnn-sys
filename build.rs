@@ -411,14 +411,13 @@ fn link_libraries(
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
 
-    // whole-archive: keep MNN backend runtime creators registered via static
-    // init. When the converter is enabled, link_converter whole-archives libMNN
-    // by full path together with MNNConvertDeps instead, so skip it here to
-    // avoid linking MNN twice.
+    // No whole-archive: MNN::registerBackend calls every runtime creator
+    // directly (source/core/Backend.cpp), so nothing relies on static-init
+    // self-registration surviving the linker's archive pruning. When the
+    // converter is enabled, link_converter links libMNN by full path together
+    // with MNNConvertDeps instead, so skip it here to avoid linking MNN twice.
     if !converter_enabled {
-        println!("cargo:rustc-link-arg=-Wl,--whole-archive");
         println!("cargo:rustc-link-lib=static=MNN");
-        println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
     }
 
     match os {
