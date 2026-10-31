@@ -6,6 +6,7 @@
 
 use ndarray::{ArrayD, ArrayViewD, IxDyn};
 use std::ffi::{CStr, CString};
+use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
 #[allow(non_camel_case_types)]
@@ -79,6 +80,18 @@ pub enum MemoryMode {
     High = 2,
 }
 
+/// Where MNN's thread pool runs. `High` pins it to the fastest cores, which is
+/// what its per-cluster work split assumes; `Normal` leaves placement to the
+/// kernel scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(i32)]
+pub enum PowerMode {
+    #[default]
+    Normal = 0,
+    High = 1,
+    Low = 2,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Backend {
     #[default]
@@ -93,35 +106,26 @@ pub enum Backend {
 
 #[derive(Debug, Clone)]
 pub struct InferenceConfig {
-    pub thread_count: i32,
+    pub thread_count: NonZeroUsize,
     pub precision_mode: PrecisionMode,
     pub use_cache: bool,
     pub data_format: DataFormat,
     pub backend: Backend,
     pub memory_mode: MemoryMode,
+    pub power_mode: PowerMode,
 }
 
-impl Default for InferenceConfig {
-    fn default() -> Self {
+impl InferenceConfig {
+    pub fn new(thread_count: NonZeroUsize) -> Self {
         Self {
-            thread_count: 4,
+            thread_count,
             precision_mode: PrecisionMode::Normal,
             use_cache: false,
             data_format: DataFormat::NCHW,
             backend: Backend::CPU,
             memory_mode: MemoryMode::Normal,
+            power_mode: PowerMode::Normal,
         }
-    }
-}
-
-impl InferenceConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_threads(mut self, threads: i32) -> Self {
-        self.thread_count = threads;
-        self
     }
 
     pub fn with_precision(mut self, precision: PrecisionMode) -> Self {
@@ -144,9 +148,15 @@ impl InferenceConfig {
         self
     }
 
+    pub fn with_power(mut self, power: PowerMode) -> Self {
+        self.power_mode = power;
+        self
+    }
+
     fn to_ffi(&self) -> ffi::MNNR_Config {
         ffi::MNNR_Config {
-            thread_count: self.thread_count,
+            thread_count: i32::try_from(self.thread_count.get())
+                .expect("thread count fits in i32"),
             precision_mode: self.precision_mode as i32,
             backend: match self.backend {
                 Backend::CPU => 0,
@@ -160,6 +170,7 @@ impl InferenceConfig {
             use_cache: self.use_cache,
             data_format: self.data_format as i32,
             memory_mode: self.memory_mode as i32,
+            power_mode: self.power_mode as i32,
         }
     }
 }
@@ -285,7 +296,7 @@ impl ModuleEngine {
         model_path: impl AsRef<std::path::Path>,
         input_names: &[&str],
         output_names: &[&str],
-        config: Option<InferenceConfig>,
+        config: InferenceConfig,
     ) -> Result<Self> {
         if input_names.is_empty() || output_names.is_empty() {
             return Err(MnnError::InvalidParameter(
@@ -328,8 +339,7 @@ impl ModuleEngine {
         let output_ptrs: Vec<*const std::ffi::c_char> =
             output_storage.iter().map(|s| s.as_ptr()).collect();
 
-        let cfg = config.unwrap_or_default();
-        let c_config = cfg.to_ffi();
+        let c_config = config.to_ffi();
         let module_ptr = unsafe {
             ffi::mnnr_create_module_from_file(
                 path.as_ptr(),
@@ -513,15 +523,14 @@ pub struct InferenceEngine {
 }
 
 impl InferenceEngine {
-    pub fn from_buffer(model_buffer: &[u8], config: Option<InferenceConfig>) -> Result<Self> {
+    pub fn from_buffer(model_buffer: &[u8], config: InferenceConfig) -> Result<Self> {
         if model_buffer.is_empty() {
             return Err(MnnError::InvalidParameter(
                 "Model data is empty".to_string(),
             ));
         }
 
-        let cfg = config.unwrap_or_default();
-        let c_config = cfg.to_ffi();
+        let c_config = config.to_ffi();
 
         let engine_ptr = unsafe {
             ffi::mnnr_create_engine(
@@ -545,7 +554,7 @@ impl InferenceEngine {
 
     pub fn from_file(
         model_path: impl AsRef<std::path::Path>,
-        config: Option<InferenceConfig>,
+        config: InferenceConfig,
     ) -> Result<Self> {
         let path = model_path.as_ref();
         let path = path.to_str().ok_or_else(|| {
@@ -555,8 +564,7 @@ impl InferenceEngine {
             MnnError::ModelLoadFailed("Model path contains an interior NUL byte".to_string())
         })?;
 
-        let cfg = config.unwrap_or_default();
-        let c_config = cfg.to_ffi();
+        let c_config = config.to_ffi();
 
         let engine_ptr = unsafe { ffi::mnnr_create_engine_from_file(path.as_ptr(), &c_config) };
 
@@ -842,7 +850,7 @@ impl SessionPool {
     pub fn new(
         engine: &InferenceEngine,
         pool_size: usize,
-        config: Option<InferenceConfig>,
+        config: InferenceConfig,
     ) -> Result<Self> {
         if pool_size == 0 {
             return Err(MnnError::InvalidParameter(
@@ -850,8 +858,7 @@ impl SessionPool {
             ));
         }
 
-        let cfg = config.unwrap_or_default();
-        let c_config = cfg.to_ffi();
+        let c_config = config.to_ffi();
 
         let pool_ptr = unsafe {
             ffi::mnnr_create_session_pool(engine.as_ptr().as_ptr(), pool_size, &c_config)
@@ -989,20 +996,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_config_default() {
-        let config = InferenceConfig::default();
-        assert_eq!(config.thread_count, 4);
+    fn test_config_defaults() {
+        let config = InferenceConfig::new(NonZeroUsize::new(4).unwrap());
+        assert_eq!(config.thread_count.get(), 4);
         assert_eq!(config.precision_mode, PrecisionMode::Normal);
     }
 
     #[test]
     fn test_config_builder() {
-        let config = InferenceConfig::new()
-            .with_threads(8)
+        let config = InferenceConfig::new(NonZeroUsize::new(8).unwrap())
             .with_precision(PrecisionMode::High)
             .with_backend(Backend::Metal);
 
-        assert_eq!(config.thread_count, 8);
+        assert_eq!(config.thread_count.get(), 8);
         assert_eq!(config.precision_mode, PrecisionMode::High);
         assert_eq!(config.backend, Backend::Metal);
     }

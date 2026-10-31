@@ -76,12 +76,13 @@ extern "C"
     // Configuration for inference engine
     typedef struct
     {
-        int32_t thread_count;   // Number of threads (0 for auto, -1 to use MNN default thread pool)
+        int32_t thread_count;   // Number of threads, at least 1
         int32_t precision_mode; // 0=Normal, 1=Low(faster), 2=High(accurate)
         int32_t backend;        // 0=CPU, 4=Vulkan
         bool use_cache;         // Whether to use cache file
         int32_t data_format;    // Input/Output data format
         int32_t memory_mode;    // 0=Normal, 1=Low, 2=High
+        int32_t power_mode;     // 0=Normal, 1=High (pin to fastest cores), 2=Low (pin to slowest cores)
     } MNNR_Config;
 
     // ============== Version & Info ==============

@@ -140,15 +140,24 @@ static MNNForwardType backend_to_forward_type(const MNNR_Config *config)
     }
 }
 
+static MNN::BackendConfig::PowerMode power_mode_to_backend(const MNNR_Config *config)
+{
+    switch (config ? config->power_mode : 0)
+    {
+    case 1:
+        return MNN::BackendConfig::Power_High;
+    case 2:
+        return MNN::BackendConfig::Power_Low;
+    default:
+        return MNN::BackendConfig::Power_Normal;
+    }
+}
+
 static MNN_ScheduleBundle create_schedule_config(const MNNR_Config *config)
 {
     MNN_ScheduleBundle bundle;
     bundle.schedule_config.type = backend_to_forward_type(config);
-    bundle.schedule_config.numThread = config ? config->thread_count : 4;
-    if (bundle.schedule_config.numThread <= 0)
-    {
-        bundle.schedule_config.numThread = 4;
-    }
+    bundle.schedule_config.numThread = config->thread_count;
 
     switch (config ? config->precision_mode : 0)
     {
@@ -175,6 +184,7 @@ static MNN_ScheduleBundle create_schedule_config(const MNNR_Config *config)
         bundle.backend_config.memory = MNN::BackendConfig::Memory_Normal;
         break;
     }
+    bundle.backend_config.power = power_mode_to_backend(config);
     bundle.schedule_config.backendConfig = &bundle.backend_config;
 
     return bundle;
@@ -269,11 +279,7 @@ MNN_SharedRuntime *mnnr_create_runtime(const MNNR_Config *config)
 {
     auto runtime = new MNN_SharedRuntime();
 
-    runtime->thread_count = config ? config->thread_count : 4;
-    if (runtime->thread_count <= 0)
-    {
-        runtime->thread_count = 4;
-    }
+    runtime->thread_count = config->thread_count;
 
     runtime->precision_mode = config ? config->precision_mode : 0;
 
@@ -305,6 +311,7 @@ MNN_SharedRuntime *mnnr_create_runtime(const MNNR_Config *config)
         runtime->backend_config.memory = MNN::BackendConfig::Memory_Normal;
         break;
     }
+    runtime->backend_config.power = power_mode_to_backend(config);
     runtime->schedule_config.backendConfig = &runtime->backend_config;
 
     return runtime;
